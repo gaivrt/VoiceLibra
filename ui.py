@@ -112,7 +112,7 @@ def convert_to_audio(state, reference_audio, output_format):
         return
         
     # Create output directory if not exists
-    out_dir = os.path.join(os.getcwd(), "output")  # 使用绝对路径
+    out_dir = os.path.join(os.getcwd(), "output")
     os.makedirs(out_dir, exist_ok=True)
     
     # Clean up previous temp chapter files
@@ -128,32 +128,40 @@ def convert_to_audio(state, reference_audio, output_format):
     ref_text = None
     if reference_audio is not None:
         ref_path = reference_audio.name
-        # If there's a separate text to accompany reference audio, we could ask user (not implemented, use empty or could derive via STT if needed)
         ref_text = ""
+
     # Generate audio for each chapter
     chapter_files = []
     for idx, ch in enumerate(chapters, start=1):
         chapter_title = ch["title"]
         chapter_text = ch["text"]
         
-        yield f"合成章节 {idx}/{total_chapters}: {chapter_title}", None, None
+        current_message = f"合成章节 {idx}/{total_chapters}: {chapter_title}"
+        yield current_message, None, None
+        
         try:
+            def progress_callback(msg):
+                nonlocal current_message
+                # Yield both chapter progress and sentence progress
+                yield f"{current_message}\n{msg}", None, None
+
             # 使用新的长文本合成方法
             audio_segments = tts_client.synthesize_long_text(
                 text=chapter_text,
                 reference_audios=[ref_path] if ref_path else None,
                 reference_texts=[ref_text] if ref_text else None,
                 output_format="wav",
-                progress_callback=progress_callback
+                progress_callback=lambda msg: next(progress_callback(msg))
             )
             
-            # 保存音频片段，使用正确的路径
+            # 保存音频片段
             chap_file = os.path.join(out_dir, f"temp_chapter_{idx:03d}.wav")
             
-            # 合并音频片段
+            # 合并音频片段并显示进度
             with wave.open(chap_file, 'wb') as outfile:
                 first_segment = True
-                for audio_data in audio_segments:
+                segment_count = len(audio_segments)
+                for i, audio_data in enumerate(audio_segments, 1):
                     with wave.open(io.BytesIO(audio_data)) as infile:
                         if first_segment:
                             outfile.setnchannels(infile.getnchannels())
@@ -161,6 +169,8 @@ def convert_to_audio(state, reference_audio, output_format):
                             outfile.setframerate(infile.getframerate())
                             first_segment = False
                         outfile.writeframes(infile.readframes(infile.getnframes()))
+                    # Show merging progress
+                    yield f"{current_message}\n合并音频片段: {i}/{segment_count}", None, None
             
             chapter_files.append((chapter_title, chap_file))
             
