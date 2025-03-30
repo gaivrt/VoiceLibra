@@ -2,6 +2,8 @@ import requests
 import ormsgpack
 import os
 import json
+import io
+import wave
 from typing import Optional, List, Dict, Union
 
 # 默认配置
@@ -95,7 +97,7 @@ class TTSClient:
             
         return response.content
 
-    def split_into_sentences(text: str) -> list:
+    def split_into_sentences(self, text: str) -> list:
         """将文本分割成句子"""
         # 定义句子结束标记
         end_marks = ['。', '！', '？', '!', '?', '.']
@@ -200,9 +202,30 @@ def synthesize_text(text: str,
                    reference_text: str = None, 
                    output_format: str = "wav") -> bytes:
     """Synthesize speech from text"""
-    return tts_client.synthesize(
-        text=text,
-        reference_audios=[reference_audio_path] if reference_audio_path else None,
-        reference_texts=[reference_text] if reference_text else None,
-        output_format=output_format
-    )
+    if len(text) > 1000:  # 如果文本较长，使用分句合成
+        segments = tts_client.synthesize_long_text(
+            text=text,
+            reference_audios=[reference_audio_path] if reference_audio_path else None,
+            reference_texts=[reference_text] if reference_text else None,
+            output_format=output_format
+        )
+        # 合并音频片段
+        with io.BytesIO() as outfile:
+            with wave.open(outfile, 'wb') as wf:
+                first_segment = True
+                for audio_data in segments:
+                    with wave.open(io.BytesIO(audio_data), 'rb') as infile:
+                        if first_segment:
+                            wf.setnchannels(infile.getnchannels())
+                            wf.setsampwidth(infile.getsampwidth())
+                            wf.setframerate(infile.getframerate())
+                            first_segment = False
+                        wf.writeframes(infile.readframes(infile.getnframes()))
+            return outfile.getvalue()
+    else:  # 短文本直接合成
+        return tts_client.synthesize(
+            text=text,
+            reference_audios=[reference_audio_path] if reference_audio_path else None,
+            reference_texts=[reference_text] if reference_text else None,
+            output_format=output_format
+        )

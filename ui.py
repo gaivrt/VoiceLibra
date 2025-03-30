@@ -136,19 +136,24 @@ def convert_to_audio(state, reference_audio, output_format):
         # 使用新的分句合成方法
         yield f"合成章节 {idx}/{total_chapters}: {chapter_title}", None, None
         try:
-            # 创建一个闭包函数来处理进度回调
-            def progress_handler(msg):
-                yield f"{msg}", None, None
-            
+            # 创建进度回调
+            def progress_callback(msg):
+                nonlocal progress_message
+                progress_message = msg
+                
+            progress_message = ""
             # 使用新的长文本合成方法
             audio_segments = tts_client.synthesize_long_text(
                 text=chapter_text,
                 reference_audios=[ref_path] if ref_path else None,
                 reference_texts=[ref_text] if ref_text else None,
                 output_format="wav",
-                progress_callback=progress_handler
+                progress_callback=progress_callback
             )
             
+            if progress_message:
+                yield progress_message, None, None
+                
             # 保存音频片段
             chap_file = os.path.join(out_dir, f"temp_chapter_{idx:03d}.wav")
             
