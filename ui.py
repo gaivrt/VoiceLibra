@@ -5,8 +5,49 @@ import wave
 import subprocess
 import gradio as gr
 
-from parser import convert_to_epub, parse_epub
-from tts_fish import synthesize_text
+from parser import convert_to_epub, parse_epub, get_first_paragraph
+from tts_fish import synthesize_text, test_voice_clone
+
+def test_voice_cloning(reference_audio):
+    """Test voice cloning with a sample sentence"""
+    if not reference_audio:
+        return "请先上传参考音频文件。", None
+    try:
+        audio_bytes = test_voice_clone(reference_audio.name)
+        # Save temporary wav file for preview
+        temp_file = "output/voice_test.wav"
+        os.makedirs("output", exist_ok=True)
+        with open(temp_file, "wb") as f:
+            f.write(audio_bytes)
+        return "克隆声音测试完成！请听下面的音频预览：", temp_file
+    except Exception as e:
+        return f"声音克隆测试失败: {str(e)}", None
+
+def test_chapter_synthesis(state, reference_audio, chapter_index):
+    """Test synthesize first paragraph of selected chapter"""
+    if not state or "chapters" not in state:
+        return "请先上传并解析电子书。", None
+    
+    chapters = state["chapters"]
+    if not (0 <= chapter_index < len(chapters)):
+        return "无效的章节索引。", None
+        
+    chapter = chapters[chapter_index]
+    first_para = get_first_paragraph(chapter["text"])
+    if not first_para:
+        return "无法获取章节内容。", None
+        
+    try:
+        ref_path = reference_audio.name if reference_audio else None
+        audio_bytes = synthesize_text(first_para, ref_path)
+        # Save temporary wav file
+        temp_file = f"output/chapter_{chapter_index+1}_test.wav"
+        os.makedirs("output", exist_ok=True)
+        with open(temp_file, "wb") as f:
+            f.write(audio_bytes)
+        return f"章节 {chapter_index+1} 第一段合成完成！请听下面的音频预览：", temp_file
+    except Exception as e:
+        return f"章节测试合成失败: {str(e)}", None
 
 def parse_book(file_obj):
     """
@@ -213,17 +254,43 @@ def create_ui():
     with gr.Blocks(title="Ebook to Audiobook Converter") as demo:
         gr.Markdown("# E-book to Audiobook Converter (Fish-Speech TTS)")
         with gr.Row():
-            book_file = gr.File(label="Upload E-book", file_types=['.epub', '.pdf', '.mobi', '.txt', '.html', '.rtf', '.chm', '.lit', '.pdb', '.fb2', '.odt', '.cbr', '.cbz', '.prc', '.lrf', '.pml', '.snb', '.cbc', '.rb', '.tcr'])
-            ref_audio = gr.File(label="Reference Voice Audio (optional)", file_types=['audio'])
-        output_format = gr.Dropdown(label="Output Format", choices=["m4b","mp3","wav","aac","flac"], value="m4b")
-        parse_btn = gr.Button("Preview Chapters")
-        convert_btn = gr.Button("Convert to Audio")
-        progress = gr.HTML(label="Progress", value="")
-        chapters_preview = gr.HTML(label="Chapters Preview")
-        audio_output = gr.HTML(label="Audio Preview")
-        download_output = gr.File(label="Download Audiobook", interactive=False)
+            book_file = gr.File(label="上传电子书", file_types=['.epub', '.pdf', '.mobi', '.txt', '.html', '.rtf', '.chm', '.lit', '.pdb', '.fb2', '.odt', '.cbr', '.cbz', '.prc', '.lrf', '.pml', '.snb', '.cbc', '.rb', '.tcr'])
+            ref_audio = gr.File(label="参考音频 (可选)", file_types=['audio'])
+        
+        with gr.Row():
+            parse_btn = gr.Button("预览章节")
+            test_voice_btn = gr.Button("测试克隆声音")
+            
+        chapters_preview = gr.HTML(label="章节预览")
+        
+        with gr.Row():
+            chapter_index = gr.Number(label="测试章节索引", value=0, minimum=0, step=1)
+            test_chapter_btn = gr.Button("测试章节合成")
+            
+        preview_status = gr.Markdown("")
+        preview_audio = gr.Audio(label="音频预览", type="filepath")
+        
+        output_format = gr.Dropdown(label="输出格式", choices=["m4b","mp3","wav","aac","flac"], value="m4b")
+        convert_btn = gr.Button("转换为有声书")
+        progress = gr.HTML(label="进度")
+        audio_output = gr.HTML(label="音频预览")
+        download_output = gr.File(label="下载有声书", interactive=False)
+        
         # Setup interactions
         state = gr.State()
-        parse_btn.click(fn=parse_book, inputs=book_file, outputs=[chapters_preview, state])
-        convert_btn.click(fn=convert_to_audio, inputs=[state, ref_audio, output_format], outputs=[progress, audio_output, download_output])
+        parse_btn.click(fn=parse_book, 
+                       inputs=book_file, 
+                       outputs=[chapters_preview, state])
+                       
+        test_voice_btn.click(fn=test_voice_cloning,
+                           inputs=ref_audio,
+                           outputs=[preview_status, preview_audio])
+                           
+        test_chapter_btn.click(fn=test_chapter_synthesis,
+                             inputs=[state, ref_audio, chapter_index],
+                             outputs=[preview_status, preview_audio])
+                             
+        convert_btn.click(fn=convert_to_audio, 
+                         inputs=[state, ref_audio, output_format], 
+                         outputs=[progress, audio_output, download_output])
     return demo

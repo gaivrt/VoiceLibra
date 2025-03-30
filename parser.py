@@ -5,6 +5,90 @@ import ebooklib
 from ebooklib import epub
 from bs4 import BeautifulSoup
 
+def should_skip_content(title: str, text: str) -> bool:
+    """判断是否应该跳过这个内容"""
+    # 标题关键词过滤
+    skip_titles = [
+        "版权信息", "copyright", "目录", "contents",
+        "前言", "序言", "preface", "introduction",
+        "出版信息", "publication", "致谢", "acknowledgments",
+        "作者简介", "about the author", "附录", "appendix"
+    ]
+    
+    if title:
+        title_lower = title.lower()
+        if any(keyword in title_lower for keyword in skip_titles):
+            return True
+            
+    # 内容关键词过滤
+    skip_content = [
+        "版权所有", "copyright", "all rights reserved",
+        "出版社", "publisher", "isbn", "定价",
+        "本书编写", "编委会", "责任编辑"
+    ]
+    
+    text_lower = text.lower()
+    if any(keyword in text_lower for keyword in skip_content):
+        return True
+        
+    # 内容长度过滤(过短的可能是目录项)
+    if len(text.strip()) < 100:
+        return True
+        
+    return False
+
+def merge_short_chapters(chapters: list, min_length: int = 1000) -> list:
+    """合并过短的章节"""
+    result = []
+    temp_chapter = None
+    
+    for chapter in chapters:
+        if not temp_chapter:
+            temp_chapter = chapter.copy()
+            continue
+            
+        # 如果当前章节太短，尝试与下一章节合并
+        if len(temp_chapter["text"]) < min_length:
+            temp_chapter["text"] = temp_chapter["text"] + "\n\n" + chapter["text"]
+            temp_chapter["title"] = temp_chapter["title"]  # 保留第一个章节的标题
+        else:
+            result.append(temp_chapter)
+            temp_chapter = chapter.copy()
+            
+    if temp_chapter:
+        result.append(temp_chapter)
+        
+    return result
+
+def get_first_paragraph(text: str, max_length: int = 200) -> str:
+    """
+    Extract the first meaningful paragraph from text, limited to max_length characters.
+    Tries to break at sentence boundary if possible.
+    """
+    # Split into paragraphs (by double newlines)
+    paragraphs = [p.strip() for p in text.split('\n\n')]
+    # Find first non-empty paragraph
+    for para in paragraphs:
+        if para:
+            # If paragraph is too long, try to break at sentence boundary
+            if len(para) > max_length:
+                # Simple sentence splitting (for Chinese and English)
+                sentences = []
+                current = ""
+                for char in para:
+                    current += char
+                    if char in '。.!?！？':
+                        sentences.append(current)
+                        current = ""
+                        if len(''.join(sentences)) >= max_length:
+                            break
+                if sentences:
+                    return ''.join(sentences)
+                # If can't break at sentence, just truncate
+                return para[:max_length] + '...'
+            return para
+    return ""
+
 def convert_to_epub(input_path: str) -> str:
     """
     Convert the given ebook file to EPUB format using Calibre's ebook-convert if needed.
@@ -32,57 +116,82 @@ def parse_epub(epub_path: str):
     Returns a tuple (book_title, chapters) where chapters is a list of dict {title, text}.
     """
     book = epub.read_epub(epub_path)
-    # Attempt to get book title from metadata
+    chapters = []
+    
+    # 获取书名
     title = None
     metadata_titles = book.get_metadata('DC', 'title')
     if metadata_titles:
         title = metadata_titles[0][0]
-    # Iterate over document items (chapters)
-    chapters = []
+        
     for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
-        # Skip items that are likely not content (like nav or css)
-        # EPUB nav (table of contents) is typically ITEM_NAV or type 'toc'
-        if item.get_name().endswith("nav.xhtml") or item.get_name().endswith("nav.htm"):
+        # 跳过导航文件
+        if "nav" in item.get_name().lower():
             continue
-        # Get raw HTML content
+            
         content = item.get_content()
         if not content:
             continue
-        # Parse HTML content to extract text
+            
+        # 解析HTML
         soup = BeautifulSoup(content, "html.parser")
-        # Remove scripts, styles if any
         for tag in soup(["script", "style"]):
             tag.decompose()
-        text = soup.get_text(separator="\n")
-        text = text.strip()
-        if not text:
-            continue
-        # Determine chapter title: use item title if exists in metadata or first heading
+            
+        # 提取标题
         chapter_title = None
-        # Check if this item has a title in the EPUB Spine/TOC
-        # ebooklib's get_metadata for 'title' doesn't apply to chapters easily, so find first header tag as title
         header = soup.find(['h1', 'h2', 'h3', 'h4', 'h5'])
         if header:
             chapter_title = header.get_text().strip()
+            
+        # 提取正文
+        text = soup.get_text(separator="\n").strip()
+        
+        # 跳过内容检查
+        if should_skip_content(chapter_title, text):
+            continue
+            
+        # 如果没找到标题但有正文，尝试从正文开头提取
+        if not chapter_title and text:
+            lines = text.split('\n')
+            # 查找可能的标题行(短行)
+            for line in lines[:3]:  # 只检查前3行
+                line = line.strip()
+                if 10 < len(line) < 50:  # 标题通常是这个长度范围
+                    chapter_title = line
+                    text = '\n'.join(lines[lines.index(line)+1:])
+                    break
+                    
         if not chapter_title:
-            # Fallback: use file name or generic "Chapter X"
             chapter_title = f"Chapter {len(chapters) + 1}"
-        chapters.append({"title": chapter_title, "text": text})
-    # If no chapters found (maybe plain text?), treat entire text as one chapter
-    if not chapters:
-        # In case the EPUB had no clear chapter splits, just use full text
-        full_text = ""
-        for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
-            if item.get_name().endswith("nav.xhtml") or item.get_name().endswith("nav.htm"):
-                continue
-            content = item.get_content()
-            if content:
-                soup = BeautifulSoup(content, "html.parser")
-                for tag in soup(["script", "style"]):
-                    tag.decompose()
-                text = soup.get_text(separator="\n").strip()
-                full_text += text + "\n"
-        full_text = full_text.strip()
-        if full_text:
-            chapters = [{"title": title or "Chapter 1", "text": full_text}]
+            
+        chapters.append({
+            "title": chapter_title,
+            "text": text
+        })
+        
+    # 如果整本书被当作一个章节，尝试分割
+    if len(chapters) == 1 and len(chapters[0]["text"]) > 5000:
+        text = chapters[0]["text"]
+        new_chapters = []
+        paragraphs = text.split('\n\n')
+        current_chapter = {"title": "Chapter 1", "text": ""}
+        
+        for para in paragraphs:
+            if len(current_chapter["text"]) > 3000:  # 每章大约3000字
+                new_chapters.append(current_chapter)
+                current_chapter = {
+                    "title": f"Chapter {len(new_chapters) + 1}",
+                    "text": para
+                }
+            else:
+                current_chapter["text"] += "\n\n" + para
+                
+        if current_chapter["text"]:
+            new_chapters.append(current_chapter)
+        chapters = new_chapters
+        
+    # 合并过短的章节
+    chapters = merge_short_chapters(chapters)
+    
     return title, chapters
