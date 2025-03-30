@@ -5,6 +5,11 @@ import json
 import io
 import wave
 from typing import Optional, List, Dict, Union
+from tqdm import tqdm
+
+# 确保输出目录存在
+OUTPUT_DIR = "output"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # 默认配置
 DEFAULT_CONFIG = {
@@ -202,6 +207,9 @@ def synthesize_text(text: str,
                    reference_text: str = None, 
                    output_format: str = "wav") -> bytes:
     """Synthesize speech from text"""
+    # 确保输出目录存在
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    
     if len(text) > 1000:  # 如果文本较长，使用分句合成
         segments = tts_client.synthesize_long_text(
             text=text,
@@ -213,6 +221,8 @@ def synthesize_text(text: str,
         with io.BytesIO() as outfile:
             with wave.open(outfile, 'wb') as wf:
                 first_segment = True
+                # 创建进度条
+                pbar = tqdm(total=len(segments), desc="合并音频片段")
                 for audio_data in segments:
                     with wave.open(io.BytesIO(audio_data), 'rb') as infile:
                         if first_segment:
@@ -221,6 +231,8 @@ def synthesize_text(text: str,
                             wf.setframerate(infile.getframerate())
                             first_segment = False
                         wf.writeframes(infile.readframes(infile.getnframes()))
+                    pbar.update(1)  # 更新进度条
+                pbar.close()  # 关闭进度条
             return outfile.getvalue()
     else:  # 短文本直接合成
         return tts_client.synthesize(

@@ -110,9 +110,11 @@ def convert_to_audio(state, reference_audio, output_format):
     if total_chapters == 0:
         yield "No text found in the book to convert.", None, None
         return
+        
     # Create output directory if not exists
-    out_dir = "output"
+    out_dir = os.path.join(os.getcwd(), "output")  # 使用绝对路径
     os.makedirs(out_dir, exist_ok=True)
+    
     # Clean up previous temp chapter files
     for fname in os.listdir(out_dir):
         if fname.startswith("temp_chapter_"):
@@ -120,6 +122,7 @@ def convert_to_audio(state, reference_audio, output_format):
                 os.remove(os.path.join(out_dir, fname))
             except:
                 pass
+
     # Determine reference audio and text if provided
     ref_path = None
     ref_text = None
@@ -133,15 +136,8 @@ def convert_to_audio(state, reference_audio, output_format):
         chapter_title = ch["title"]
         chapter_text = ch["text"]
         
-        # 使用新的分句合成方法
         yield f"合成章节 {idx}/{total_chapters}: {chapter_title}", None, None
         try:
-            # 创建进度回调
-            def progress_callback(msg):
-                nonlocal progress_message
-                progress_message = msg
-                
-            progress_message = ""
             # 使用新的长文本合成方法
             audio_segments = tts_client.synthesize_long_text(
                 text=chapter_text,
@@ -151,10 +147,7 @@ def convert_to_audio(state, reference_audio, output_format):
                 progress_callback=progress_callback
             )
             
-            if progress_message:
-                yield progress_message, None, None
-                
-            # 保存音频片段
+            # 保存音频片段，使用正确的路径
             chap_file = os.path.join(out_dir, f"temp_chapter_{idx:03d}.wav")
             
             # 合并音频片段
@@ -163,12 +156,10 @@ def convert_to_audio(state, reference_audio, output_format):
                 for audio_data in audio_segments:
                     with wave.open(io.BytesIO(audio_data)) as infile:
                         if first_segment:
-                            # 设置输出文件参数
                             outfile.setnchannels(infile.getnchannels())
                             outfile.setsampwidth(infile.getsampwidth())
                             outfile.setframerate(infile.getframerate())
                             first_segment = False
-                        # 写入音频数据
                         outfile.writeframes(infile.readframes(infile.getnframes()))
             
             chapter_files.append((chapter_title, chap_file))
@@ -177,10 +168,11 @@ def convert_to_audio(state, reference_audio, output_format):
             err_html = f"<p style='color:red'><strong>TTS合成失败:</strong> {str(e)}</p>"
             yield err_html, None, None
             return
-    # All chapters synthesized, now merge into final output
+
     yield "All chapters synthesized. Merging into final audiobook...", None, None
-    # Prepare metadata file for chapters (for formats that support chapters)
-    metadata_path = None
+    
+    # Prepare metadata file for chapters
+    metadata_path = os.path.join(out_dir, "chapters.txt")
     supports_chapters = output_format.lower() in ["m4b", "m4a", "mp4", "mov", "webm"]
     chapter_durations_ms = []
     total_duration_ms = 0
@@ -197,7 +189,6 @@ def convert_to_audio(state, reference_audio, output_format):
             duration_ms = 0
         chapter_durations_ms.append(duration_ms)
     if supports_chapters:
-        metadata_path = os.path.join(out_dir, "chapters.txt")
         with open(metadata_path, "w", encoding="utf-8") as mf:
             mf.write(";FFMETADATA1\n")
             # Write global metadata
