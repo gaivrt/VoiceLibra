@@ -95,6 +95,94 @@ class TTSClient:
             
         return response.content
 
+    def split_into_sentences(text: str) -> list:
+        """将文本分割成句子"""
+        # 定义句子结束标记
+        end_marks = ['。', '！', '？', '!', '?', '.']
+        # 定义不应该分割的情况(如 Mr. Dr. 等)
+        exceptions = ['Mr.', 'Mrs.', 'Dr.', 'Ph.D.', 'etc.', 'e.g.', 'i.e.']
+        
+        sentences = []
+        current_sentence = ""
+        
+        i = 0
+        while i < len(text):
+            char = text[i]
+            current_sentence += char
+            
+            # 检查是否是句子结束
+            if char in end_marks:
+                # 检查是否是例外情况
+                is_exception = False
+                for exc in exceptions:
+                    if text[max(0, i-len(exc)+1):i+1] == exc:
+                        is_exception = True
+                        break
+                
+                # 如果不是例外，则添加到结果中
+                if not is_exception:
+                    current_sentence = current_sentence.strip()
+                    if current_sentence:
+                        sentences.append(current_sentence)
+                    current_sentence = ""
+            
+            i += 1
+        
+        # 处理最后一个句子
+        if current_sentence.strip():
+            sentences.append(current_sentence.strip())
+        
+        return sentences
+
+    def synthesize_long_text(self, 
+                            text: str,
+                            reference_audios: Optional[List[str]] = None,
+                            reference_texts: Optional[List[str]] = None,
+                            output_format: str = "wav",
+                            streaming: bool = None,
+                            progress_callback = None) -> List[bytes]:
+        """
+        将长文本分句后逐句合成
+        
+        Args:
+            text: 要合成的文本
+            reference_audios: 参考音频文件路径列表
+            reference_texts: 参考音频对应的文本列表
+            output_format: 输出音频格式
+            streaming: 是否使用流式模式
+            progress_callback: 进度回调函数
+        
+        Returns:
+            音频数据列表
+        """
+        sentences = self.split_into_sentences(text)
+        audio_segments = []
+        
+        for i, sentence in enumerate(sentences):
+            if not sentence.strip():
+                continue
+                
+            try:
+                audio_data = self.synthesize(
+                    text=sentence,
+                    reference_audios=reference_audios,
+                    reference_texts=reference_texts,
+                    output_format=output_format,
+                    streaming=streaming
+                )
+                audio_segments.append(audio_data)
+                
+                # 报告进度
+                if progress_callback:
+                    progress = (i + 1) / len(sentences) * 100
+                    progress_callback(f"正在合成第 {i+1}/{len(sentences)} 句 ({progress:.1f}%)")
+                    
+            except Exception as e:
+                print(f"Warning: Failed to synthesize sentence: {sentence[:50]}... Error: {str(e)}")
+                continue
+                
+        return audio_segments
+
 # Create global client instance
 tts_client = TTSClient()
 

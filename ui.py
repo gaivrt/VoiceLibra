@@ -4,9 +4,13 @@ import base64
 import wave
 import subprocess
 import gradio as gr
+import io
 
 from parser import convert_to_epub, parse_epub, get_first_paragraph
-from tts_fish import synthesize_text, test_voice_clone
+from tts_fish import synthesize_text, test_voice_clone, TTSClient
+
+# 创建全局TTS客户端实例
+tts_client = TTSClient()
 
 def test_voice_cloning(reference_audio):
     """Test voice cloning with a sample sentence"""
@@ -128,20 +132,46 @@ def convert_to_audio(state, reference_audio, output_format):
     for idx, ch in enumerate(chapters, start=1):
         chapter_title = ch["title"]
         chapter_text = ch["text"]
-        # Announce progress
-        yield f"Synthesizing chapter {idx}/{total_chapters}: {chapter_title}", None, None
+        
+        # 使用新的分句合成方法
+        yield f"合成章节 {idx}/{total_chapters}: {chapter_title}", None, None
         try:
-            audio_bytes = synthesize_text(chapter_text, reference_audio_path=ref_path, reference_text=ref_text, output_format="wav")
+            # 创建一个闭包函数来处理进度回调
+            def progress_handler(msg):
+                yield f"{msg}", None, None
+            
+            # 使用新的长文本合成方法
+            audio_segments = tts_client.synthesize_long_text(
+                text=chapter_text,
+                reference_audios=[ref_path] if ref_path else None,
+                reference_texts=[ref_text] if ref_text else None,
+                output_format="wav",
+                progress_callback=progress_handler
+            )
+            
+            # 保存音频片段
+            chap_file = os.path.join(out_dir, f"temp_chapter_{idx:03d}.wav")
+            
+            # 合并音频片段
+            with wave.open(chap_file, 'wb') as outfile:
+                first_segment = True
+                for audio_data in audio_segments:
+                    with wave.open(io.BytesIO(audio_data)) as infile:
+                        if first_segment:
+                            # 设置输出文件参数
+                            outfile.setnchannels(infile.getnchannels())
+                            outfile.setsampwidth(infile.getsampwidth())
+                            outfile.setframerate(infile.getframerate())
+                            first_segment = False
+                        # 写入音频数据
+                        outfile.writeframes(infile.readframes(infile.getnframes()))
+            
+            chapter_files.append((chapter_title, chap_file))
+            
         except Exception as e:
-            # If TTS fails, stop and show error
-            err_html = f"<p style='color:red'><strong>TTS synthesis failed:</strong> {str(e)}</p>"
+            err_html = f"<p style='color:red'><strong>TTS合成失败:</strong> {str(e)}</p>"
             yield err_html, None, None
             return
-        # Save chapter audio to wav file
-        chap_file = os.path.join(out_dir, f"temp_chapter_{idx:03d}.wav")
-        with open(chap_file, "wb") as f:
-            f.write(audio_bytes)
-        chapter_files.append((chapter_title, chap_file))
     # All chapters synthesized, now merge into final output
     yield "All chapters synthesized. Merging into final audiobook...", None, None
     # Prepare metadata file for chapters (for formats that support chapters)
@@ -282,10 +312,12 @@ def create_ui():
                        inputs=book_file, 
                        outputs=[chapters_preview, state])
                        
+
         test_voice_btn.click(fn=test_voice_cloning,
                            inputs=ref_audio,
                            outputs=[preview_status, preview_audio])
                            
+
         test_chapter_btn.click(fn=test_chapter_synthesis,
                              inputs=[state, ref_audio, chapter_index],
                              outputs=[preview_status, preview_audio])
