@@ -96,7 +96,7 @@ def parse_book(file_obj):
     preview_html = "<p><strong>Chapters Detected:</strong></p>\n" + "<br>".join(preview_lines)
     return gr.update(value=preview_html), state
 
-def convert_to_audio(state, reference_audio, output_format):
+def convert_to_audio(state, reference_audio, output_format, start_chapter, end_chapter):
     """
     Gradio event function to convert parsed chapters to audiobook.
     Uses Fish-Speech TTS for each chapter and ffmpeg to merge with metadata.
@@ -112,12 +112,20 @@ def convert_to_audio(state, reference_audio, output_format):
         book_title = state.get("book_title", "Audiobook")
         orig_name = state.get("orig_name", "output")
         total_chapters = len(chapters)
+
+        # Validate chapter range
+        start_chapter = max(1, min(int(start_chapter), total_chapters))
+        end_chapter = max(start_chapter, min(int(end_chapter), total_chapters))
         
-        log_message(f"Processing book: {book_title}, chapters: {total_chapters}, format: {output_format}")
+        # Get selected chapters
+        selected_chapters = chapters[start_chapter-1:end_chapter]
+        selected_total = len(selected_chapters)
         
-        if total_chapters == 0:
-            log_message("No chapters found in book")
-            yield "No text found in the book to convert.", None, None
+        log_message(f"Processing book: {book_title}, chapters {start_chapter}-{end_chapter} of {total_chapters}, format: {output_format}")
+        
+        if selected_total == 0:
+            log_message("No chapters found in selected range")
+            yield "No chapters found in the selected range.", None, None
             return
             
         # Create output directory if not exists
@@ -125,18 +133,18 @@ def convert_to_audio(state, reference_audio, output_format):
         os.makedirs(out_dir, exist_ok=True)
         log_message(f"Output directory: {out_dir}")
 
-        # Generate audio for each chapter
+        # Generate audio for selected chapters
         chapter_files = []
-        for idx, ch in enumerate(chapters, start=1):
+        for idx, ch in enumerate(selected_chapters, start=1):
             chapter_title = ch["title"]
             chapter_text = ch["text"]
             
             progress_html = f"""
             <div style='padding: 10px; border: 1px solid #ccc; border-radius: 5px;'>
-                <h4>正在处理章节 {idx}/{total_chapters}</h4>
+                <h4>正在处理章节 {start_chapter+idx-1}/{end_chapter} (进度: {idx}/{selected_total})</h4>
                 <p>{chapter_title}</p>
                 <div style='width: 100%; height: 20px; background: #f0f0f0; border-radius: 10px;'>
-                    <div style='width: {(idx-1)*100/total_chapters}%; height: 100%; background: #4CAF50; border-radius: 10px;'></div>
+                    <div style='width: {(idx-1)*100/selected_total}%; height: 100%; background: #4CAF50; border-radius: 10px;'></div>
                 </div>
             </div>
             """
@@ -147,7 +155,7 @@ def convert_to_audio(state, reference_audio, output_format):
                 audio_bytes = synthesize_text(chapter_text, reference_audio.name if reference_audio else None)
                 
                 # 保存章节音频
-                chap_file = os.path.join(out_dir, f"temp_chapter_{idx:03d}.wav")
+                chap_file = os.path.join(out_dir, f"temp_chapter_{start_chapter+idx-1:03d}.wav")
                 with open(chap_file, "wb") as f:
                     f.write(audio_bytes)
                 
@@ -157,7 +165,7 @@ def convert_to_audio(state, reference_audio, output_format):
                 error_html = f"""
                 <div style='padding: 15px; border: 1px solid #dc3545; border-radius: 5px;'>
                     <h3 style='color: #dc3545;'>❌ 合成失败</h3>
-                    <p>章节 {idx}: {chapter_title}</p>
+                    <p>章节 {start_chapter+idx-1}: {chapter_title}</p>
                     <p>错误: {str(e)}</p>
                 </div>
                 """
@@ -345,6 +353,10 @@ def create_ui():
         preview_status = gr.Markdown("")
         preview_audio = gr.Audio(label="音频预览", type="filepath")
         
+        with gr.Row():
+            start_chapter = gr.Number(label="起始章节", value=1, minimum=1, step=1)
+            end_chapter = gr.Number(label="结束章节", value=1, minimum=1, step=1)
+        
         output_format = gr.Dropdown(label="输出格式", choices=["m4b","mp3","wav","aac","flac"], value="m4b")
         convert_btn = gr.Button("转换为有声书")
         progress = gr.HTML(label="进度")
@@ -358,6 +370,16 @@ def create_ui():
                        outputs=[chapters_preview, state])
                        
 
+        def update_chapter_range(state):
+            if state and "chapters" in state:
+                total_chapters = len(state["chapters"])
+                return gr.update(maximum=total_chapters), gr.update(value=total_chapters, maximum=total_chapters)
+            return gr.update(), gr.update()
+        
+        parse_btn.click(fn=update_chapter_range,
+                       inputs=state,
+                       outputs=[start_chapter, end_chapter])
+
         test_voice_btn.click(fn=test_voice_cloning,
                            inputs=ref_audio,
                            outputs=[preview_status, preview_audio])
@@ -368,7 +390,7 @@ def create_ui():
                              outputs=[preview_status, preview_audio])
                              
         convert_btn.click(fn=convert_to_audio, 
-                         inputs=[state, ref_audio, output_format], 
+                         inputs=[state, ref_audio, output_format, start_chapter, end_chapter], 
                          outputs=[progress, audio_output, download_output],
                          show_progress="full")  # 启用完整进度显示
     return demo
