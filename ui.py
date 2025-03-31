@@ -6,6 +6,7 @@ import subprocess
 import gradio as gr
 import io
 
+from debug_log import log_message, log_error, log_file_status
 from parser import convert_to_epub, parse_epub, get_first_paragraph
 from tts_fish import synthesize_text, test_voice_clone, TTSClient
 
@@ -100,190 +101,228 @@ def convert_to_audio(state, reference_audio, output_format):
     Gradio event function to convert parsed chapters to audiobook.
     Uses Fish-Speech TTS for each chapter and ffmpeg to merge with metadata.
     """
-    if not state or "chapters" not in state:
-        yield "No chapters to convert. Please upload and parse a book first.", None, None
-        return
-    chapters = state["chapters"]
-    book_title = state.get("book_title", "Audiobook")
-    orig_name = state.get("orig_name", "output")
-    total_chapters = len(chapters)
-    if total_chapters == 0:
-        yield "No text found in the book to convert.", None, None
-        return
+    try:
+        log_message("Starting convert_to_audio function")
+        if not state or "chapters" not in state:
+            log_message("No chapters found in state")
+            yield "No chapters to convert. Please upload and parse a book first.", None, None
+            return
+            
+        chapters = state["chapters"]
+        book_title = state.get("book_title", "Audiobook")
+        orig_name = state.get("orig_name", "output")
+        total_chapters = len(chapters)
         
-    # Create output directory if not exists
-    out_dir = os.path.join(os.getcwd(), "output")
-    os.makedirs(out_dir, exist_ok=True)
-    
-    # Clean up previous temp chapter files
-    for fname in os.listdir(out_dir):
-        if fname.startswith("temp_chapter_"):
+        log_message(f"Processing book: {book_title}, chapters: {total_chapters}, format: {output_format}")
+        
+        if total_chapters == 0:
+            log_message("No chapters found in book")
+            yield "No text found in the book to convert.", None, None
+            return
+            
+        # Create output directory if not exists
+        out_dir = os.path.join(os.getcwd(), "output")
+        os.makedirs(out_dir, exist_ok=True)
+        log_message(f"Output directory: {out_dir}")
+
+        # Generate audio for each chapter
+        chapter_files = []
+        for idx, ch in enumerate(chapters, start=1):
+            chapter_title = ch["title"]
+            chapter_text = ch["text"]
+            
+            progress_html = f"""
+            <div style='padding: 10px; border: 1px solid #ccc; border-radius: 5px;'>
+                <h4>正在处理章节 {idx}/{total_chapters}</h4>
+                <p>{chapter_title}</p>
+                <div style='width: 100%; height: 20px; background: #f0f0f0; border-radius: 10px;'>
+                    <div style='width: {(idx-1)*100/total_chapters}%; height: 100%; background: #4CAF50; border-radius: 10px;'></div>
+                </div>
+            </div>
+            """
+            yield progress_html, None, None
+            
             try:
-                os.remove(os.path.join(out_dir, fname))
-            except:
-                pass
+                # 合成文本
+                audio_bytes = synthesize_text(chapter_text, reference_audio.name if reference_audio else None)
+                
+                # 保存章节音频
+                chap_file = os.path.join(out_dir, f"temp_chapter_{idx:03d}.wav")
+                with open(chap_file, "wb") as f:
+                    f.write(audio_bytes)
+                
+                chapter_files.append((chapter_title, chap_file))
+                
+            except Exception as e:
+                error_html = f"""
+                <div style='padding: 15px; border: 1px solid #dc3545; border-radius: 5px;'>
+                    <h3 style='color: #dc3545;'>❌ 合成失败</h3>
+                    <p>章节 {idx}: {chapter_title}</p>
+                    <p>错误: {str(e)}</p>
+                </div>
+                """
+                yield error_html, None, None
+                return
 
-    # Determine reference audio and text if provided
-    ref_path = None
-    ref_text = None
-    if reference_audio is not None:
-        ref_path = reference_audio.name
-        ref_text = ""
-
-    # Generate audio for each chapter
-    chapter_files = []
-    for idx, ch in enumerate(chapters, start=1):
-        chapter_title = ch["title"]
-        chapter_text = ch["text"]
+        # 显示合并进度
+        merge_html = f"""
+        <div style='padding: 10px; border: 1px solid #ccc; border-radius: 5px;'>
+            <h4>正在合并音频文件...</h4>
+            <div style='width: 100%; height: 20px; background: #f0f0f0; border-radius: 10px;'>
+                <div style='width: 100%; height: 100%; background: #4CAF50; border-radius: 10px;'></div>
+            </div>
+        </div>
+        """
+        yield merge_html, None, None
         
-        current_message = f"合成章节 {idx}/{total_chapters}: {chapter_title}"
-        yield current_message, None, None
+        # Prepare metadata file for chapters
+        metadata_path = os.path.join(out_dir, "chapters.txt")
+        supports_chapters = output_format.lower() in ["m4b", "m4a", "mp4", "mov", "webm"]
+        chapter_durations_ms = []
+        total_duration_ms = 0
+        for (title, chap_file) in chapter_files:
+            # Get duration in ms using wave module (since we saved as wav)
+            try:
+                w = wave.open(chap_file, 'rb')
+                frames = w.getnframes()
+                rate = w.getframerate()
+                w.close()
+                # integer milliseconds
+                duration_ms = int(frames * 1000 / rate)
+            except Exception:
+                duration_ms = 0
+            chapter_durations_ms.append(duration_ms)
+        if supports_chapters:
+            with open(metadata_path, "w", encoding="utf-8") as mf:
+                mf.write(";FFMETADATA1\n")
+                # Write global metadata
+                mf.write(f"title={book_title if book_title else orig_name}\n")
+                # Optionally, set album or artist metadata
+                mf.write(f"artist=FishSpeech TTS\n")
+                # Generate chapter metadata entries
+                start_ms = 0
+                for idx, (title, chap_file) in enumerate(chapter_files, start=1):
+                    end_ms = start_ms + (chapter_durations_ms[idx-1] - 1 if chapter_durations_ms[idx-1] > 0 else 0)
+                    mf.write("[CHAPTER]\n")
+                    mf.write("TIMEBASE=1/1000\n")
+                    mf.write(f"START={start_ms}\n")
+                    mf.write(f"END={end_ms}\n")
+                    chapter_title = title or f"Chapter {idx}"
+                    # Escape any special characters in title if needed
+                    chapter_title = chapter_title.replace("\n", " ").strip()
+                    mf.write(f"title={chapter_title}\n")
+                    start_ms = end_ms + 1
+        # Create file list for ffmpeg concat
+        list_path = os.path.join(out_dir, "chapters_list.txt")
+        with open(list_path, "w", encoding="utf-8") as lf:
+            for _, chap_file in chapter_files:
+                # ffmpeg concat requires paths properly escaped/quoted
+                lf.write(f"file '{chap_file}'\n")
+        # Determine final output file name and path
+        base_name = os.path.splitext(orig_name)[0]
+        final_file_name = f"{base_name}.{output_format.lower()}"
+        final_path = os.path.join(out_dir, final_file_name)
         
+        log_message(f"Final output file will be: {final_path}")
+        
+        # 在开始合并前显示进度
+        yield f"所有章节已合成。正在合并为有声书: {final_file_name}...", None, None
+        
+        # 在开始合并前删除可能存在的旧文件
+        if os.path.exists(final_path):
+            try:
+                os.remove(final_path)
+            except Exception as e:
+                yield f"<p style='color:orange'>警告：无法删除旧文件: {str(e)}</p>", None, None
+    
+        # Construct ffmpeg command for merging
+        cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path]
+        if os.path.exists(metadata_path):
+            cmd += ["-i", metadata_path, "-map_metadata", "1"]
+        
+        # Choose codec based on output format
+        fmt = output_format.lower()
+        if fmt in ["m4b", "m4a", "mp4", "mov"]:
+            # Use AAC codec for MP4/M4A/M4B
+            cmd += ["-c:a", "aac", "-b:a", "128k"]
+        elif fmt == "mp3":
+            cmd += ["-c:a", "libmp3lame", "-b:a", "192k"]
+        elif fmt == "flac":
+            cmd += ["-c:a", "flac"]
+        elif fmt == "wav":
+            # PCM for WAV
+            cmd += ["-c:a", "pcm_s16le"]
+        elif fmt == "aac":
+            # AAC ADTS format
+            cmd += ["-c:a", "aac", "-b:a", "128k"]
+        else:
+            # default to codec copy if unknown, though ideally never here
+            cmd += ["-c", "copy"]
+        cmd += [final_path]
+        
+        # 将命令输出到日志，方便调试
+        cmd_str = " ".join(cmd)
+        log_message(f"FFmpeg command: {cmd_str}")
+        yield f"<p>执行命令: <code>{cmd_str}</code></p>", None, None
+        
+        # 使用直接的subprocess.run而不是Popen，简化逻辑
         try:
-            def progress_callback(msg):
-                nonlocal current_message
-                # Yield both chapter progress and sentence progress
-                yield f"{current_message}\n{msg}", None, None
-
-            # 使用新的长文本合成方法
-            audio_segments = tts_client.synthesize_long_text(
-                text=chapter_text,
-                reference_audios=[ref_path] if ref_path else None,
-                reference_texts=[ref_text] if ref_text else None,
-                output_format="wav",
-                progress_callback=lambda msg: next(progress_callback(msg))
+            log_message("Starting FFmpeg process")
+            process = subprocess.run(
+                cmd, 
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False  # 不自动抛出异常
             )
             
-            # 保存音频片段
-            chap_file = os.path.join(out_dir, f"temp_chapter_{idx:03d}.wav")
+            log_message(f"FFmpeg returned with code: {process.returncode}")
             
-            # 合并音频片段并显示进度
-            with wave.open(chap_file, 'wb') as outfile:
-                first_segment = True
-                segment_count = len(audio_segments)
-                for i, audio_data in enumerate(audio_segments, 1):
-                    with wave.open(io.BytesIO(audio_data)) as infile:
-                        if first_segment:
-                            outfile.setnchannels(infile.getnchannels())
-                            outfile.setsampwidth(infile.getsampwidth())
-                            outfile.setframerate(infile.getframerate())
-                            first_segment = False
-                        outfile.writeframes(infile.readframes(infile.getnframes()))
-                    # Show merging progress
-                    yield f"{current_message}\n合并音频片段: {i}/{segment_count}", None, None
-            
-            chapter_files.append((chapter_title, chap_file))
-            
+            # 检查是否成功
+            if process.returncode == 0:
+                # 验证文件状态
+                file_status = log_file_status(final_path)
+                
+                # 确认文件存在且可读
+                if os.path.exists(final_path) and os.path.getsize(final_path) > 0:
+                    # 尝试读取确保文件完整
+                    try:
+                        with open(final_path, 'rb') as f:
+                            f.seek(0)
+                            
+                        log_message("✅ Successfully verified output file")
+                        
+                        # 成功生成，显示结果 - 使用yield而不是return确保流程完整
+                        success_html = f"""
+                        <div style='padding: 15px; border: 1px solid #28a745; border-radius: 5px; margin: 10px 0;'>
+                            <h3 style='color: #28a745; margin-bottom: 10px;'>✅ 音频转换完成</h3>
+                            <p>文件路径: {os.path.basename(final_path)}</p>
+                            <p><strong>👉 请点击下方按钮下载有声书</strong></p>
+                        </div>
+                        """
+                        log_message("Yielding success message")
+                        yield success_html, None, final_path
+                        log_message("Yield complete")
+                        return
+                    except Exception as e:
+                        log_error(f"File access error: {str(e)}", e)
+                        yield f"<p style='color:red'>文件访问错误: {str(e)}</p>", None, None
+                else:
+                    log_error(f"Output file not found or empty: {final_path}")
+                    yield f"<p style='color:red'>错误: FFmpeg运行成功但找不到输出文件: {final_path}</p>", None, None
+            else:
+                # 命令执行失败
+                stderr = process.stderr
+                log_error(f"FFmpeg error: {stderr}")
+                yield f"<p style='color:red'>FFmpeg错误: {stderr}</p>", None, None
+                
         except Exception as e:
-            err_html = f"<p style='color:red'><strong>TTS合成失败:</strong> {str(e)}</p>"
-            yield err_html, None, None
-            return
-
-    yield "All chapters synthesized. Merging into final audiobook...", None, None
-    
-    # Prepare metadata file for chapters
-    metadata_path = os.path.join(out_dir, "chapters.txt")
-    supports_chapters = output_format.lower() in ["m4b", "m4a", "mp4", "mov", "webm"]
-    chapter_durations_ms = []
-    total_duration_ms = 0
-    for (title, chap_file) in chapter_files:
-        # Get duration in ms using wave module (since we saved as wav)
-        try:
-            w = wave.open(chap_file, 'rb')
-            frames = w.getnframes()
-            rate = w.getframerate()
-            w.close()
-            # integer milliseconds
-            duration_ms = int(frames * 1000 / rate)
-        except Exception:
-            duration_ms = 0
-        chapter_durations_ms.append(duration_ms)
-    if supports_chapters:
-        with open(metadata_path, "w", encoding="utf-8") as mf:
-            mf.write(";FFMETADATA1\n")
-            # Write global metadata
-            mf.write(f"title={book_title if book_title else orig_name}\n")
-            # Optionally, set album or artist metadata
-            mf.write(f"artist=FishSpeech TTS\n")
-            # Generate chapter metadata entries
-            start_ms = 0
-            for idx, (title, chap_file) in enumerate(chapter_files, start=1):
-                end_ms = start_ms + (chapter_durations_ms[idx-1] - 1 if chapter_durations_ms[idx-1] > 0 else 0)
-                mf.write("[CHAPTER]\n")
-                mf.write("TIMEBASE=1/1000\n")
-                mf.write(f"START={start_ms}\n")
-                mf.write(f"END={end_ms}\n")
-                chapter_title = title or f"Chapter {idx}"
-                # Escape any special characters in title if needed
-                chapter_title = chapter_title.replace("\n", " ").strip()
-                mf.write(f"title={chapter_title}\n")
-                start_ms = end_ms + 1
-    # Create file list for ffmpeg concat
-    list_path = os.path.join(out_dir, "chapters_list.txt")
-    with open(list_path, "w", encoding="utf-8") as lf:
-        for _, chap_file in chapter_files:
-            # ffmpeg concat requires paths properly escaped/quoted
-            lf.write(f"file '{chap_file}'\n")
-    # Determine final output file name and path
-    base_name = os.path.splitext(orig_name)[0]
-    final_file_name = f"{base_name}.{output_format.lower()}"
-    final_path = os.path.join(out_dir, final_file_name)
-    # Construct ffmpeg command for merging
-    cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path]
-    if metadata_path:
-        cmd += ["-i", metadata_path, "-map_metadata", "1"]
-    # Choose codec based on output format
-    fmt = output_format.lower()
-    if fmt in ["m4b", "m4a", "mp4", "mov"]:
-        # Use AAC codec for MP4/M4A/M4B
-        cmd += ["-c:a", "aac", "-b:a", "128k"]
-    elif fmt == "mp3":
-        cmd += ["-c:a", "libmp3lame", "-b:a", "192k"]
-    elif fmt == "flac":
-        cmd += ["-c:a", "flac"]
-    elif fmt == "wav":
-        # PCM for WAV
-        cmd += ["-c:a", "pcm_s16le"]
-    elif fmt == "aac":
-        # AAC ADTS format
-        cmd += ["-c:a", "aac", "-b:a", "128k"]
-    else:
-        # default to codec copy if unknown, though ideally never here
-        cmd += ["-c", "copy"]
-    cmd += [final_path]
-    # Run ffmpeg to create final file
-    try:
-        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    except subprocess.CalledProcessError as e:
-        err = e.stderr.decode('utf-8', errors='ignore')
-        yield f"<p style='color:red'><strong>FFmpeg merge failed:</strong> {err}</p>", None, None
-        return
-    # Optionally, cleanup individual chapter files to save space (skip for now)
-    # Prepare HTML with audio players for each chapter
-    players_html = "<h3>Chapters Audio Preview:</h3>\n"
-    for idx, (title, chap_file) in enumerate(chapter_files, start=1):
-        # Read audio data and base64 encode
-        try:
-            with open(chap_file, "rb") as f:
-                audio_data = f.read()
-            # Determine MIME type by extension (assuming wav here)
-            mime = "audio/wav"
-            if chap_file.endswith(".mp3"):
-                mime = "audio/mpeg"
-            elif chap_file.endswith(".flac"):
-                mime = "audio/flac"
-            elif chap_file.endswith(".aac"):
-                mime = "audio/aac"
-            elif chap_file.endswith(".wav"):
-                mime = "audio/wav"
-            b64_audio = base64.b64encode(audio_data).decode('utf-8')
-            audio_tag = f"<audio controls src='data:{mime};base64,{b64_audio}'></audio>"
-        except Exception as e:
-            audio_tag = "<em>[Audio data unavailable]</em>"
-        safe_title = title or f"Chapter {idx}"
-        players_html += f"<p><strong>Chapter {idx}: {safe_title}</strong><br>{audio_tag}</p>\n"
-    # Provide download link for final file via Gradio File component
-    return "Conversion completed!", players_html, final_path
+            log_error(f"Error running FFmpeg: {str(e)}", e)
+            yield f"<p style='color:red'>运行错误: {str(e)}</p>", None, None
+        
+    except Exception as e:
+        log_error(f"Unexpected error in convert_to_audio: {str(e)}", e)
+        yield f"<p style='color:red'>处理过程中出现未知错误: {str(e)}</p>", None, None
 
 def create_ui():
     """Construct and return the Gradio Blocks interface."""
@@ -330,5 +369,6 @@ def create_ui():
                              
         convert_btn.click(fn=convert_to_audio, 
                          inputs=[state, ref_audio, output_format], 
-                         outputs=[progress, audio_output, download_output])
+                         outputs=[progress, audio_output, download_output],
+                         show_progress="full")  # 启用完整进度显示
     return demo

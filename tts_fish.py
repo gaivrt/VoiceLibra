@@ -16,7 +16,7 @@ DEFAULT_CONFIG = {
     "host": "127.0.0.1",
     "port": 8080,
     "max_retries": 3,
-    "timeout": 30,
+    "timeout": 60,
     "streaming": False
 }
 
