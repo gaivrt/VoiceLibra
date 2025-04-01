@@ -13,9 +13,9 @@ def main():
     parser.add_argument('--start', '-s', type=int, default=1, help='起始章节 (默认: 1)')
     parser.add_argument('--end', '-e', type=int, help='结束章节 (默认: 最后一章)')
     parser.add_argument('--output', '-o', default='output', help='输出目录 (默认: output)')
-    parser.add_argument('--format', '-f', default='m4b', 
-                       choices=['m4b', 'mp3', 'wav', 'aac', 'flac'],
-                       help='输出格式 (默认: m4b)')
+    parser.add_argument('--format', '-f', default='mav', 
+                       choices=['mp3', 'wav', 'pcm'],
+                       help='输出格式 (默认: mav)')
     
     args = parser.parse_args()
     
